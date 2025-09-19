@@ -2,14 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/products_provider.dart';
-import '../providers/products_stream.dart'; // <-- add (Commit 4)
+import '../providers/products_stream.dart';
 import '../services/products_api.dart';
 import '../services/products_repo.dart';
 import '../utils/debouncer.dart';
+import '../widgets/about_screen.dart';
 import '../widgets/product_row.dart';
 import '../widgets/states.dart';
 import 'product_detail.dart';
 
+/// Top-level screen with two modes:
+///  - Future-based pagination
+///  - Stream-based pagination
 class ProductsScreen extends StatefulWidget {
   const ProductsScreen({super.key});
 
@@ -18,8 +22,13 @@ class ProductsScreen extends StatefulWidget {
 }
 
 class _ProductsScreenState extends State<ProductsScreen> {
-  int _modeIndex = 0; // 0 = Future, 1 = Stream
+  // 0 = Future tab, 1 = Stream tab
+  int _modeIndex = 0;
+
+  // One controller reused across tabs.
   final ScrollController _scroll = ScrollController();
+
+  // Debounced search to avoid spamming the data layer.
   late final Debouncer _debouncer;
   late final TextEditingController _searchCtl;
 
@@ -40,7 +49,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Provide repository + controllers once; children attach their own scroll listeners
+    // Provide repository + controllers once; children attach their own listeners.
     return MultiProvider(
       providers: [
         Provider<ProductsRepository>(
@@ -63,7 +72,20 @@ class _ProductsScreenState extends State<ProductsScreen> {
       child: Builder(
         builder: (context) {
           return Scaffold(
-            appBar: AppBar(title: const Text('Products Explorer')),
+            appBar: AppBar(
+              title: const Text('Products Explorer'),
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.info_outline),
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const AboutScreen()),
+                    );
+                  },
+                ),
+              ],
+            ),
             body: Column(
               children: [
                 const SizedBox(height: 8),
@@ -73,8 +95,18 @@ class _ProductsScreenState extends State<ProductsScreen> {
                     ButtonSegment(value: 1, label: Text('Stream')),
                   ],
                   selected: {_modeIndex},
-                  onSelectionChanged:
-                      (s) => setState(() => _modeIndex = s.first),
+                  onSelectionChanged: (s) {
+                    setState(() => _modeIndex = s.first);
+                    // Optional: “nudge” the scroll so we don’t immediately think we’re at bottom.
+                    if (_scroll.hasClients) {
+                      _scroll.jumpTo(
+                        _scroll.position.pixels.clamp(
+                          0,
+                          _scroll.position.maxScrollExtent,
+                        ),
+                      );
+                    }
+                  },
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
@@ -140,14 +172,13 @@ class _FutureListViewState extends State<_FutureListView> {
   }
 
   void _onChildScroll() {
-    // Provider is visible here (child context under MultiProvider)
     final prov = context.read<FutureProductsProvider>();
+    if (!widget.scrollController.hasClients) return;
 
-    if (!widget.scrollController.hasClients || prov.loadingMore) return;
+    // Hard guards: do nothing if busy or no more pages.
+    if (prov.loadingMore || !prov.hasMore) return;
 
     final remaining = widget.scrollController.position.extentAfter;
-    // Debug
-    // debugPrint('[FutureScroll] extentAfter=$remaining; hasMore=${prov.hasMore}');
     if (remaining < 300) {
       prov.loadMore();
     }
@@ -162,7 +193,17 @@ class _FutureListViewState extends State<_FutureListView> {
       return FullScreenError(message: prov.error!, onRetry: prov.loadFirstPage);
     }
     if (prov.items.isEmpty) {
-      return const FullScreenEmpty(message: 'No products found.');
+      // Don’t attach controller here—prevents accidental load loops on short lists.
+      return RefreshIndicator(
+        onRefresh: prov.refreshAll,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 300),
+            FullScreenEmpty(message: 'No products found.'),
+          ],
+        ),
+      );
     }
 
     final items = prov.items;
@@ -170,8 +211,7 @@ class _FutureListViewState extends State<_FutureListView> {
       onRefresh: prov.refreshAll,
       child: ListView.separated(
         controller: widget.scrollController,
-        physics:
-            const AlwaysScrollableScrollPhysics(), // works even if list is short
+        physics: const AlwaysScrollableScrollPhysics(),
         itemCount: items.length + (prov.loadingMore ? 1 : 0),
         separatorBuilder: (_, __) => const Divider(height: 1),
         itemBuilder: (ctx, i) {
@@ -204,6 +244,7 @@ class _StreamListView extends StatefulWidget {
 
 class _StreamListViewState extends State<_StreamListView> {
   late final StreamProductsController _ctrl;
+  StreamProductsState? _lastState; // so the scroll listener can consult it
 
   @override
   void initState() {
@@ -220,9 +261,15 @@ class _StreamListViewState extends State<_StreamListView> {
 
   void _onChildScroll() {
     if (!widget.scrollController.hasClients) return;
+    final s = _lastState;
+    if (s == null) return;
+
+    // CRITICAL GUARDS: don’t paginate while busy, with empty items, or when no more pages.
+    if (s.loading || s.loadingMore || !s.hasMore || s.items.isEmpty) return;
+
     final remaining = widget.scrollController.position.extentAfter;
     if (remaining < 300) {
-      _ctrl.loadMore(); // guarded inside controller
+      _ctrl.loadMore(); // internal guards + tiny cooldown in controller
     }
   }
 
@@ -230,10 +277,13 @@ class _StreamListViewState extends State<_StreamListView> {
   Widget build(BuildContext context) {
     return StreamBuilder<StreamProductsState>(
       stream: _ctrl.stream,
+      initialData: const StreamProductsState(loading: true),
       builder: (context, snap) {
         final s = snap.data ?? const StreamProductsState(loading: true);
+        _lastState = s;
 
         if (s.loading && s.items.isEmpty) return const FullScreenLoader();
+
         if (s.error != null && s.items.isEmpty) {
           return FullScreenError(
             message: s.error!,
@@ -243,10 +293,10 @@ class _StreamListViewState extends State<_StreamListView> {
 
         final visible = s.filteredItems;
         if (visible.isEmpty) {
+          // IMPORTANT: don’t attach the shared scroll controller to the empty view.
           return RefreshIndicator(
             onRefresh: _ctrl.refreshAll,
             child: ListView(
-              controller: widget.scrollController,
               physics: const AlwaysScrollableScrollPhysics(),
               children: const [
                 SizedBox(height: 300),
