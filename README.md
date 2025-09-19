@@ -9,6 +9,8 @@ Supports infinite scroll, pull-to-refresh, product details, error/empty states, 
 Clone the repository:
 
 git clone https://github.com/RISHI-SONI345/cyber-point-assignment
+
+
 cd products_explorer
 
 
