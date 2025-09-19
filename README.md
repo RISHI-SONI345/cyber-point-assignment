@@ -88,7 +88,7 @@ Stream mode implementation: ~2 hrs
 
 Search, pull-to-refresh, infinite scroll: ~1 hr
 
-Error/empty states, shimmer loader, theming: ~1 hr
+Error/empty states, theming: ~1 hr
 
 Tests + README + polish: ~0.5–1 hr
 
